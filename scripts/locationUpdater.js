@@ -7,6 +7,7 @@ const moment = require('moment');
 const _ = require('lodash');
 
 const locationResources = require('./location-resources.json');
+const prepositionsAndArticles = require('./prepositions_and_articles.json');
 
 const LICENSE_KEYS = Object.keys(locationResources.licenses);
 
@@ -36,14 +37,15 @@ const parseCsv = delimiter => file => csvtojson({
     delimiter
 }).fromString(file);
 
-const sourceDataApplier = cfg => data => ({data, ...cfg});
-
 const downloadResource = (uri, delimiter) => ((/\.(?:zip|gz)$/i).test(uri) ? downloadUnzip(uri) : downloadText(uri))
     .then(parseCsv(delimiter));
 
 const cleanField = (value) => {
     if (typeof value === 'number' && isNaN(value)) {
         return;
+    }
+    if(typeof value === 'object') {
+        return cleanObject(value);
     }
     if (typeof value !== 'string') {
         return value;
@@ -56,6 +58,9 @@ const cleanField = (value) => {
 };
 
 const cleanObject = (obj) => {
+    if (!obj) {
+        return undefined;
+    }
     const out = {};
     Object.entries(obj).forEach(([key, value]) => {
         const cleanValue = cleanField(value);
@@ -63,17 +68,34 @@ const cleanObject = (obj) => {
             out[key] = cleanValue;
         }
     });
+    if (!Object.keys(out).length) {
+        return;
+    }
     return out;
 };
 
-const belfioreToInt = code => (code.charCodeAt()-65)*10**3 + parseInt(code.substr(1));
+const fixName = (name) => {
+    if (!name) {
+        return;
+    }
+    return name.replace(/[^\s']+'?/gi, (word) => {
+        const lowerWord = word.toLowerCase();
+        if (prepositionsAndArticles.includes(word.toUpperCase())) {
+            return lowerWord;
+        }
+        return _.capitalize(lowerWord);
+    }).replace(/^[^\s']+/i, word => _.capitalize(word));
+};
+
 const dataMapper1 = defaultSourceCode => data => data
     .map(obj => cleanObject({
         belfioreCode: obj['Codice AT'] || obj['CODCATASTALE'],
-        name: obj['Denominazione IT'] || obj['Denominazione (b)'] || obj['DENOMINAZIONE_IT'],
+        name: fixName(obj['Denominazione IT'] || obj['Denominazione (b)'] || obj['DENOMINAZIONE_IT']),
         // newIstatCode: obj['Codice Stato/Territorio_Figlio'],
-        iso3166alpha2: obj['Codice ISO 3166 alpha2'],
-        iso3166alpha3: obj['Codice ISO 3166 alpha3'],
+        iso3166: {
+            alpha2: obj['Codice ISO 3166 alpha2'],
+            alpha3: obj['Codice ISO 3166 alpha3']
+        },
         creationDate: obj['DATAISTITUZIONE'] && moment(obj['DATAISTITUZIONE'], 'YYYY-MM-DD').startOf('day').toISOString(),
         expirationDate: obj['STATO'] === 'C' && obj['DATACESSAZIONE'] && moment(obj['DATACESSAZIONE'], 'YYYY-MM-DD').endOf('day').toISOString() ||
             obj['Anno evento'] && moment(obj['Anno evento'], 'YYYY').endOf('year').toISOString(),
@@ -116,14 +138,4 @@ Promise.all(locationResources.resources.map(async ({uri, delimiter, defaultSourc
     .then(mergeLists)
 ))
     .then(mergeLists)
-    .then(sourceDataApplier({
-        licenses: LICENSE_KEYS.map(k => locationResources.licenses[k]),
-        sources: [].concat(locationResources.resources.map(({uri}) => uri)).reduce((a, b) => a.concat(b)).filter(uri => !!uri)
-    }))
     .then(data => new Promise((resolve, reject) => fs.writeFile(path.join(detinationPath, 'cities-countries.json'), JSON.stringify(data, null, 4), (err) => err ? reject(err) : resolve())));
-
-Promise.all(Object.entries(locationResources.licenseFiles).map(([licenseId, uri]) => downloadText(uri).then(data => ({ [licenseId]: data }))))
-    .then(licenses => Object.assign({}, ...licenses))
-    .then((licenses) => Promise.all(Object.values(locationResources.licenses)
-        .map(({license, name}) => new Promise((resolve, reject) => fs.writeFile(path.join(detinationPath, `${name.toUpperCase().replace(/[^A-Z\d]/g, '_')}.LICENSE`), licenses[license], (err) => err ? reject(err) : resolve())))
-    ));
